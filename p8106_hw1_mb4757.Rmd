@@ -1,0 +1,242 @@
+---
+title: "P8106 HW 1" 
+author: "Minjie Bao"
+output:
+  pdf_document:
+    toc: yes
+    toc_depth: 2
+  html_document:
+    df_print: paged
+    toc: yes
+    toc_depth: '2'
+header-includes:
+- \usepackage{fancyhdr}
+- \usepackage{lipsum}
+- \pagestyle{fancy}
+- \fancyhead[R]{\thepage}
+- \fancypagestyle{plain}{\pagestyle{fancy}}
+--- 
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+
+\newpage
+
+```{r}
+library(caret)
+library(ModelMetrics)
+library(doBy) # which.minn()
+library(RNHANES)
+library(tidyverse)
+library(summarytools)
+library(leaps)
+library(ISLR)
+library(glmnet)
+library(plotmo)
+library(pls)
+
+set.seed(2021)
+```
+
+# Data preparation
+
+```{r}
+train_df = read_csv('./data/solubility_train.csv') %>% 
+  janitor::clean_names() %>% 
+  na.omit()
+
+test_df = read_csv('./data/solubility_test.csv') %>% 
+  janitor::clean_names() %>% 
+   na.omit()
+```
+
+
+# a) linear regression method
+
+Fit a linear model using least squares on the training data and calculate the mean
+squared error using the test data.
+
+```{r}
+fit1 = lm(solubility~ ., data = train_df)
+# summary(fit1)
+pred.lm = predict(fit1, newdata = test_df)
+MSE_linear = mean((pred.lm - test_df$solubility)^2);MSE_linear
+```
+
+The mean squared error using the test data is 0.5559.
+
+
+# b) ridge regression model
+
+Fit a ridge regression model on the training data, with lambda chosen by cross-validation.
+Report the test error.
+
+```{r}
+set.seed(1)
+# fit the ridge regression (alpha = 0) with a sequence of lambdas
+ridge.mod <- glmnet(x = model.matrix(solubility ~ ., train_df)[ ,-1], 
+                    y = train_df$solubility, 
+                    standardize = TRUE,
+                    alpha = 0, 
+                    lambda = exp(seq(5, -5, length = 100)))
+
+mat.coef <- coef(ridge.mod)
+dim(mat.coef)
+
+# Trace plot
+plot_glmnet(ridge.mod, xvar = "rlambda", label = 19)
+
+# Cross Validation
+set.seed(1)
+cv.ridge <- cv.glmnet(x = model.matrix(solubility ~ ., train_df)[ ,-1], 
+                      y = train_df$solubility, 
+                      type.measure = "mse",
+                      alpha = 0, 
+                      lambda = exp(seq(5, -5, length = 100)))
+
+
+plot(cv.ridge)
+abline(h = (cv.ridge$cvm + cv.ridge$cvsd)[which.min(cv.ridge$cvm)], col = 4, lwd = 2)
+
+# min CV MSE
+cv.ridge$lambda.min
+# the 1SE rule
+cv.ridge$lambda.1se
+
+
+# extract coefficients
+pred.coeff = predict(cv.ridge, s = cv.ridge$lambda.min, type = "coefficients")
+
+# make prediction
+pred.ridge = predict(cv.ridge, newx = model.matrix(solubility ~ ., test_df)[ ,-1], 
+             s = "lambda.min", type = "response")
+
+#test error
+MSE_ridge = mse(test_df$solubility, pred.ridge);MSE_ridge
+
+```
+For ridge model, the best lambda is 0.0688 and the mean squared error using the test data is 0.5122.
+
+
+# c) lasso model
+
+Fit a lasso model on the training data, with lambda chosen by cross-validation. Report the test error and the number of non-zero coeffcient estimates in your model.
+
+```{r}
+#cross validation
+set.seed(1)
+cv.lasso <- cv.glmnet(x = model.matrix(solubility ~ ., train_df)[ ,-1], 
+                      y = train_df$solubility,  
+                      alpha = 1, 
+                      lambda = exp(seq(0, -6, length = 300)))
+
+cv.lasso$lambda.min
+plot(cv.lasso)
+
+plot_glmnet(cv.lasso$glmnet.fit)
+
+#extract coefficient
+num_coeff = sum(predict(cv.lasso, s = "lambda.min", type = "coefficients") != 0);num_coeff
+
+# make prediction
+pred.lasso = predict(cv.lasso, newx = model.matrix(solubility ~ ., test_df)[ ,-1], s = "lambda.min", type = "response")
+
+#test error
+MSE_lasso = mse(test_df$solubility, pred.lasso);MSE_lasso
+```
+
+For Lasso model, the best lambda is 0.0047, the mean squared error using the test data is 0.4982, and the number of non-zero coefficient estimates is 141.
+
+
+# d) PCR model
+
+Fit a principle component regression model on the training data, with M chosen by
+cross-validation. Report the test error and the value of M selected by cross-validation.
+
+```{r}
+set.seed(1)
+pcr.mod <- pcr(solubility ~ ., 
+               data = train_df,
+               scale = TRUE, # scale = FALSE by default
+               validation = "CV")
+
+# summary(pcr.mod)
+validationplot(pcr.mod, val.type="MSEP", newdata = test_df, legendpos = "topright")
+
+cv.mse <- RMSEP(pcr.mod)
+ncomp.cv <- which.min(cv.mse$val[1,,])-1
+ncomp.cv
+
+predy2.pcr <- predict(pcr.mod, newdata = test_df, 
+                      ncomp = ncomp.cv)
+# test MSE
+MSE_pcr = mean((predy2.pcr - test_df$solubility)^2)
+
+```
+For PCR model, the test error MSE using the test data is 0.5478 and the value of M selected by cross-validation is 152.
+
+# e) Model comparison
+
+Which model will you choose for predicting solubility?
+
+Using caret fits all the models again:
+```{r}
+ctrl1 <- trainControl(method = "cv", 
+                      selectionFunction = "best") # "oneSE" for the 1SE rule
+
+set.seed(1)
+lm.fit <- train(x = model.matrix(solubility ~ ., train_df)[ ,-1], 
+                y = train_df$solubility,
+                method = "lm",
+                trControl = ctrl1)
+
+
+set.seed(1)
+ridge.fit <- train(x = model.matrix(solubility ~ ., train_df)[ ,-1], 
+                   y = train_df$solubility,
+                   method = "glmnet",
+                   tuneGrid = expand.grid(alpha = 0, 
+                                          lambda = exp(seq(5, -5, length = 100))),
+                   trControl = ctrl1)
+
+
+set.seed(1)
+lasso.fit <- train(x = model.matrix(solubility ~ ., train_df)[ ,-1], 
+                   y = train_df$solubility,
+                   method = "glmnet",
+                   tuneGrid = expand.grid(alpha = 1, 
+                                          lambda = exp(seq(0, -6, length = 300))),
+                   trControl = ctrl1)
+
+
+
+set.seed(22)
+pcr.fit <- train(x = model.matrix(solubility ~ ., train_df)[ ,-1], 
+                 y = train_df$solubility,
+                  method = "pcr",
+                  tuneLength = ncol(df),
+                  trControl = ctrl1,
+                  preProcess = c("center", "scale"))
+
+
+
+set.seed(1)
+resamp <- resamples(list(lm = lm.fit,
+                         lasso = lasso.fit, 
+                         ridge = ridge.fit, 
+                         pcr = pcr.fit
+                         ))
+summary(resamp)
+
+bwplot(resamp, metric = "RMSE")
+
+cbind(c("Model", "LS", "Ridge", "Lasso", "PCR"), c("MSE", MSE_linear, MSE_ridge, MSE_lasso, MSE_pcr)) %>% 
+  knitr::kable()
+```
+
+From both box plot and test error (MSE) table, we can see that Lasso model has the smallest mean square error (0.4982) and linear regression model has the largest MSE (0.5559). Therefore, we conclude that Lasso model fits the data best and it is the best model for predicting solubility.
+
+
+
